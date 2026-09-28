@@ -1,0 +1,533 @@
+// Схема данных ClientFlow (многоворкспейсная).
+//
+//   Workspace  — компания/команда. Граница ВСЕХ данных: у клиента, проекта,
+//                счёта, задачи, метки и записи времени всегда есть workspaceId.
+//   User       — человек. Один аккаунт, N членств (WorkspaceMember).
+//   Project    — работа клиента. Видимость: все члены воркспейса + явно
+//                добавленные ProjectMember.
+//   Task       — может НЕ иметь проекта: так устроена личная доска.
+//   Invoice    — сумма считается из items, статус — из платежей.
+//
+// Даты храним DateTime, деньги — целыми копейками (amount Int): float для
+// денег даёт ошибки округления при суммировании позиций.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  memberships      WorkspaceMember[]
+  sessions         Session[]
+  notifications    Notification[]
+  /// Кто вызвал уведомление («Аня назначила тебе задачу») — отдельная связь.
+  notificationAsActor Notification[] @relation("NotificationActor")
+  invitationsSent  Invitation[]     @relation("InvitationIssuer")
+  comments         TaskComment[]
+  timeEntries      TimeEntry[]
+  assignedTasks    Task[]           @relation("TaskAssignee")
+  reportedTasks    Task[]           @relation("TaskReporter")
+  activityLogs     ActivityLog[]
+  projectMembership ProjectMember[]
+  managedProjects   Project[]         @relation("ProjectManager")
+  passwordResets    PasswordReset[]
+}
+
+model Session {
+  token     String   @id
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------- воркспейсы
+
+model Workspace {
+  id            String   @id @default(cuid())
+  name          String
+  plan          String   @default("FREE") // FREE | STARTER | TEAM | ENTERPRISE
+  seats         Int      @default(5)
+  currency      String   @default("RUB")
+  deletedAt     DateTime?
+  createdAt     DateTime @default(now())
+
+  // Подписка: провайдер живёт вне приложения, здесь только то, что показывает UI.
+  subscriptionStatus String    @default("ACTIVE") // ACTIVE | PAST_DUE | CANCELED
+  stripeCustomerId   String?
+  currentPeriodEnd   DateTime?
+
+  members    WorkspaceMember[]
+  projects   Project[]
+  clients    Client[]
+  invoices   Invoice[]
+  labels     Label[]
+  categories TimeCategory[]
+  invitations Invitation[]
+  activityLogs ActivityLog[]
+
+  /// Время и задачи живут в воркспейсе напрямую: отчёт по персональной
+  /// продуктивности не должен идти через проект, которого у задачи может не быть.
+  timeEntries TimeEntry[]
+  tasks       Task[]
+}
+
+model WorkspaceMember {
+  id          String   @id @default(cuid())
+  workspaceId String
+  userId      String
+  role        String   @default("MEMBER") // OWNER | ADMIN | MEMBER
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+}
+
+model Invitation {
+  id          String    @id @default(cuid())
+  workspaceId String
+  email       String
+  role        String    @default("MEMBER")
+  token       String    @unique
+  invitedById String
+  acceptedAt  DateTime?
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invitedBy User      @relation("InvitationIssuer", fields: [invitedById], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, email])
+}
+
+// ------------------------------------------------------------------- клиенты
+
+model Client {
+  id          String    @id @default(cuid())
+  workspaceId String
+  name        String
+  email       String?
+  phone       String?
+  company     String?
+  industry    String?
+  website     String?
+  note        String?
+  archivedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  projects  Project[]
+  invoices  Invoice[]
+  contacts  Contact[]
+
+  @@index([workspaceId, name])
+}
+
+/// Контактное лицо клиента: с ним переписываются, ему отправляют счёт.
+model Contact {
+  id       String  @id @default(cuid())
+  clientId String
+  name     String
+  email    String?
+  position String?
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId])
+}
+
+// ------------------------------------------------------------------- проекты
+
+enum ProjectStatus {
+  ACTIVE
+  ON_HOLD
+  DONE
+  ARCHIVED
+}
+
+model Project {
+  id          String        @id @default(cuid())
+  workspaceId String
+  clientId    String
+  name        String
+  description String?
+  status      ProjectStatus @default(ACTIVE)
+  budget      Int?
+  hoursBudget Int?
+  spent       Int           @default(0)
+  hourlyRate  Int?
+  /// Срок сдачи: по нему считается прогресс списка проектов и овердью-баннер.
+  dueDate     DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  workspace Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  client    Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  members   ProjectMember[]
+  tasks     Task[]
+  invoices  Invoice[]
+  timeEntries TimeEntry[]
+  activityLogs ActivityLog[]
+
+  /// Менеджер проекта — член воркспейса; получает уведомления о просрочках.
+  managerId String?
+  manager   User?   @relation("ProjectManager", fields: [managerId], references: [id], onDelete: SetNull)
+
+  /// Тип оплаты: HOURLY — время в счёт, FIXED/RETAINER — позиция вручную.
+  billingType    String  @default("HOURLY") // HOURLY | FIXED | RETAINER
+  /// По умолчанию новые записи времени по проекту считаются оплачиваемыми.
+  billableDefault Boolean @default(true)
+  /// Внутренний счётчик для человекочитаемых кодов задач (CF-1, CF-2…).
+  codeSequence   Int     @default(0)
+
+  /// Регулярная работа: cron создаёт задачу по nextRunAt и сдвигает его на шаг.
+  recurring    Boolean   @default(false)
+  recurrence   String?   // DAILY | WEEKLY | BIWEEKLY | MONTHLY
+  nextRunAt    DateTime?
+  lastGenTitle String?
+  occurrence   Int       @default(0)
+  estimate     Int?
+
+  @@index([workspaceId, clientId])
+  @@index([workspaceId, status])
+  @@index([nextRunAt])
+}
+
+model ProjectMember {
+  id        String   @id @default(cuid())
+  projectId String
+  userId    String
+  role      String   @default("MEMBER")
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+  @@index([userId])
+}
+
+// -------------------------------------------------------------------- задачи
+
+enum TaskStatus {
+  BACKLOG
+  TODO
+  IN_PROGRESS
+  REVIEW
+  DONE
+  CANCELED
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+model Task {
+  id          String       @id @default(cuid())
+  title       String
+  description String?
+  status      TaskStatus   @default(TODO)
+  priority    TaskPriority @default(MEDIUM)
+  position    Int          @default(0)
+  estimate    Int?
+  dueDate     DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  /// Воркспейс задачи: для задач проекта совпадает с воркспейсом проекта,
+  /// для личной доски это воркспейс, в котором задачу создали.
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  /// Пусто — задача личной доски пользователя, не проекта.
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  assigneeId String?
+  assignee   User?   @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  reporterId String?
+  reporter   User?   @relation("TaskReporter", fields: [reporterId], references: [id], onDelete: SetNull)
+
+  comments      TaskComment[]
+  labels        TaskLabelOnTask[]
+  timeEntries   TimeEntry[]
+  checklistItems ChecklistItem[]
+
+  /// Отметка «письмо о просрочке отправлено», чтобы cron не повторялся.
+  overdueNotifiedAt DateTime?
+
+  /// Счётчик изменений для оптимистичной блокировки: канбан отправляет
+  /// версию, с которой карточку взяли, и устаревшая запись отклоняется
+  /// вместо того, чтобы молча перезаписать чужое перетаскивание.
+  version Int @default(1)
+
+  @@index([workspaceId, status])
+  @@index([projectId, status])
+  @@index([assigneeId, status])
+  @@index([dueDate])
+}
+
+model TaskComment {
+  id        String   @id @default(cuid())
+  taskId    String
+  userId    String
+  body      String
+  createdAt DateTime @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, createdAt])
+}
+
+/**
+ * Пункт чек-листа задачи.
+ *
+ * Отдельная модель, а не JSON-строка в задаче: пункты отмечают по одному,
+ * и прогресс («3 из 8») считается на сервере без разбора строки.
+ */
+model ChecklistItem {
+  id       String   @id @default(cuid())
+  taskId   String
+  title    String
+  done     Boolean  @default(false)
+  position Int      @default(0)
+  createdAt DateTime @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, position])
+}
+
+/// Метка воркспейса. На личной доске — метки своего воркспейса.
+model Label {
+  id          String  @id @default(cuid())
+  workspaceId String
+  name        String
+  color       String  @default("#64748b")
+
+  workspace Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  tasks     TaskLabelOnTask[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
+}
+
+model TaskLabelOnTask {
+  taskId    String
+  labelId   String
+  assignedBy String?
+  createdAt DateTime @default(now())
+
+  task  Task  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  label Label @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+  @@index([labelId])
+
+  @@id([taskId, labelId])
+}
+
+// -------------------------------------------------------------------- время
+
+model TimeEntry {
+  id          String    @id @default(cuid())
+  workspaceId String
+  userId      String
+  taskId      String?
+  projectId   String?
+  categoryId  String?
+  date        DateTime
+  minutes     Int
+  startedAt   DateTime  @default(now())
+  stoppedAt   DateTime?
+  billable    Boolean   @default(true)
+  note        String?
+  invoiceId   String?
+  createdAt   DateTime  @default(now())
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  task      Task?          @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  project   Project?       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  category  TimeCategory?  @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  /// После выставления счёта записи закрепляются за ним и не попадают в новый.
+  invoice   Invoice?       @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  /// Одна запись на «человек × задача × день» — это инвариант сетки времени.
+  @@unique([userId, taskId, date])
+  @@index([workspaceId, date])
+  @@index([projectId, date])
+}
+
+/// Категория времени воркспейса (совещания, поддержка, админка).
+model TimeCategory {
+  id          String    @id @default(cuid())
+  workspaceId String
+  name        String
+  color       String    @default("#0ea5e9")
+  isDefault   Boolean   @default(false)
+  archivedAt  DateTime?
+
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  timeEntries TimeEntry[]
+
+  @@unique([workspaceId, name])
+}
+
+// -------------------------------------------------------------------- счета
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PAID
+  PARTIALLY_PAID
+  OVERDUE
+  VOID
+}
+
+model Invoice {
+  id          String        @id @default(cuid())
+  workspaceId String
+  clientId    String
+  projectId   String?
+  number      String
+  status      InvoiceStatus @default(DRAFT)
+  currency    String        @default("RUB")
+  issueDate   DateTime      @default(now())
+  dueDate     DateTime?
+  /// Метки жизненного цикла: «выручка за период» считается по paidAt,
+  /// а не по createdAt — дата создания счёта про деньги ничего не говорит.
+  sentAt      DateTime?
+  paidAt      DateTime?
+  notes       String?
+  subtotal    Int           @default(0)
+  taxRate     Int           @default(0)
+  total       Int           @default(0)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  workspace Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  client    Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  project   Project?      @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  items     InvoiceItem[]
+  payments  InvoicePayment[]
+  timeEntries TimeEntry[]
+
+  @@unique([workspaceId, number])
+  @@index([workspaceId, status])
+}
+
+model InvoiceItem {
+  id          String  @id @default(cuid())
+  invoiceId   String
+  description String
+  quantity    Float   @default(1)
+  unitPrice   Int     @default(0)
+  position    Int     @default(0)
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId, position])
+}
+
+/// Платёж по счету. Статус PAID вычисляется из суммы платежей, а не ставится вручную.
+model InvoicePayment {
+  id        String   @id @default(cuid())
+  invoiceId String
+  amount    Int
+  date      DateTime @default(now())
+  method    String?
+  note      String?
+  createdAt DateTime @default(now())
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId, date])
+}
+
+// ------------------------------------------------------------- прочитое
+
+model ActivityLog {
+  id          String   @id @default(cuid())
+  workspaceId String
+  userId      String?
+  projectId   String?
+  /// Что именно изменилось: { title, href, from, to, ... }. Строкой, а не JSON:
+  /// нам не нужны фильтры по полям меты, а читать её проще как текст.
+  entityId    String?
+  type        String
+  meta        String   @default("{}")
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  project   Project?  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+}
+
+enum NotificationType {
+  TASK_ASSIGNED
+  TASK_UPDATED
+  DUE_SOON
+  OVERDUE
+  INVOICE_SENT
+  INVOICE_PAID
+  MENTION
+  INVITATION
+}
+
+model Notification {
+  id          String           @id @default(cuid())
+  workspaceId String
+  userId      String
+  type        NotificationType
+  title       String
+  body        String?
+  href        String?
+  meta        String?
+  readAt      DateTime?
+  actorId     String?
+  entityId    String?
+  createdAt   DateTime         @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  actor User? @relation("NotificationActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([userId, readAt, createdAt])
+  @@index([workspaceId])
+}
+
+/// Токены сброса пароля: хеш токена + короткое время жизни.
+model PasswordReset {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
