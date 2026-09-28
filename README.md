@@ -1,36 +1,59 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ClientFlow
 
-## Getting Started
+CRM для digital-агентств: клиенты, проекты, канбан-доски, счета, учёт времени и оплаты в одном рабочем пространстве.
 
-First, run the development server:
+Портфолио-демо: Next.js 16 (App Router) + Prisma 7 + SQLite, без внешних SaaS-зависимостей — почта, PDF и планировщик работают локально или честно сообщают, что не настроены.
+
+## Возможности
+
+- **Клиенты и проекты** — карточки со статистикой, бюджетами и архивом; удаление клиента с живыми проектами заблокировано.
+- **Канбан-доска** — drag-and-drop между колонками, оптимистичный UI с откатом, оптимистичная блокировка версий (устаревшая правка → 409).
+- **Задачи** — чек-листы, комментарии, приоритеты, дедлайны, назначение исполнителей, личная доска «только мои».
+- **Учёт времени** — записи по задачам с проверкой дублей, почасовые ставки, перенос часов в позиции счёта.
+- **Счета** — позиции с НДС, нумерация `ГГГГ-NNNN` по воркспейсу, жизненный цикл `DRAFT → SENT → PARTIALLY_PAID → PAID` с переходами через отдельные маршруты (не полем правки), печать/PDF через `@media print`.
+- **Оплаты и отчёты** — кассовая книга, выручка по клиентам и месяцам, дебиторка с возрастом.
+- **Команда** — роли `VIEWER < MEMBER < MANAGER < ADMIN < OWNER`, приглашения по ссылке с проверкой мест.
+- **Активность и уведомления** — журнал действий воркспейса и in-app уведомления (просрочка, назначение, оплата счёта).
+- **Экспорт/импорт** — полный дамп воркспейса в JSON и восстановление в новый воркспейс.
+
+## Запуск
 
 ```bash
+npm install
+npm run db:push        # схема в SQLite (dev.db)
+npm run db:seed        # демо-данные
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Открыть http://localhost:3000 и войти:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+| Роль | Логин | Пароль |
+|---|---|---|
+| Владелец | `demo@clientflow.app` | `demo1234` |
+| Участник | `mark@nordwind.studio` | `demo1234` |
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Второй аккаунт показывает разницу прав: создание клиентов, проектов и счетов начинается с роли менеджера.
 
-## Learn More
+Переменные окружения — в `.env` (не коммитится). Минимальный набор для локальной работы уже в `.env.example`-формате: `DATABASE_URL` и `CRON_SECRET` (ключ планировщика; без него `/api/cron` отвечает 401).
 
-To learn more about Next.js, take a look at the following resources:
+## Скрипты
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+| Команда | Что делает |
+|---|---|
+| `npm run dev` | dev-сервер |
+| `npm run build` / `npm start` | продакшн-сборка и запуск |
+| `npm test` | 48 интеграционных тестов API (vitest) |
+| `npm run lint` / `npm run typecheck` | ESLint и tsc |
+| `npm run db:push` / `npm run db:seed` | схема и демо-данные |
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Архитектура
 
-## Deploy on Vercel
+- `src/app/api/**` — маршруты API: скоуп по воркспейсу в каждом запросе, zod-схемы на входе, единый конверт ошибок.
+- `src/lib/**` — сервисы: `invoice-service` (нумерация и итоги), `reports`, `import/export`, `validation`, `audit`, `notifications`.
+- `src/auth/**` — сессии на httpOnly-cookie, лестница ролей в `auth/workspace.ts`.
+- `prisma/schema.prisma` — модель данных; суммы в копейках (Int), валюты по клиенту.
+- `tests/**` — интеграционные тесты на маршруты: фикстуры через реальный вызов хендлеров, изолированная база на каждый тест.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Дизайн
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Дизайн-система «Air»: тёмный холст `#000`, светлые карточки-«острова» `#f5f5f5`, плоские поверхности без теней и градиентов, радиусы 4/8/12px, один акцентный цвет (Signal Blue) только для ссылок. Заголовки страниц входа — двухстилевые: прямой гротеск плюс одно слово от руки (Caveat).
